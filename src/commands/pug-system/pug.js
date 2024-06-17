@@ -3,6 +3,8 @@
 const { ApplicationCommandOptionType } = require("discord.js");
 const pugModel = require("../../models/pug-model");
 
+const userTimeouts = new Map();
+
 module.exports = {
 	devOnly: false,
 	name: "pug",
@@ -13,6 +15,7 @@ module.exports = {
 			description: "Queue duration in minutes",
 			type: ApplicationCommandOptionType.Integer,
 			minValue: 1,
+			maxValue: 240, // Set the maximum value to 240 minutes
 			required: true,
 		},
 	],
@@ -36,6 +39,15 @@ module.exports = {
 			const duration = interaction.options.getInteger("duration");
 			const userId = interaction.user.id;
 			const userTag = interaction.user.tag;
+
+			// Enforce maximum duration value
+			if (duration > 240) {
+				return interaction.reply({
+					content:
+						"The maximum queue duration is 240 minutes. Please enter a valid duration.",
+					ephemeral: true,
+				});
+			}
 
 			const existingData = await pugModel.findOne({
 				serverId: guild.id,
@@ -69,12 +81,27 @@ module.exports = {
 
 			const expireTime = Date.now() + duration * 60000;
 
-			existingData.queuedPlayers.push({
-				userId,
-				userTag,
-				joinTime: Date.now(),
-				expireTime: expireTime,
-			});
+			// Check if user is already in the queue
+			const existingUserIndex = existingData.queuedPlayers.findIndex(
+				(player) => player.userId === userId
+			);
+			if (existingUserIndex !== -1) {
+				// Remove the existing user entry and add the new one
+				existingData.queuedPlayers.splice(existingUserIndex, 1, {
+					userId,
+					userTag,
+					joinTime: Date.now(),
+					expireTime: expireTime,
+				});
+			} else {
+				// Add the user to the queue
+				existingData.queuedPlayers.push({
+					userId,
+					userTag,
+					joinTime: Date.now(),
+					expireTime: expireTime,
+				});
+			}
 
 			await existingData.save();
 
@@ -83,7 +110,13 @@ module.exports = {
 				`Duration: ${duration} minutes`
 			);
 
-			setTimeout(async () => {
+			// Clear existing timeout if any
+			if (userTimeouts.has(userId)) {
+				clearTimeout(userTimeouts.get(userId));
+			}
+
+			// Set a new timeout
+			const timeout = setTimeout(async () => {
 				console.log(`Expiring user ${userId} from PUG Queue`);
 				await removeUserFromQueue(userId, guild.id);
 
@@ -94,7 +127,13 @@ module.exports = {
 						`PUG Queue expired after ${duration} minutes`
 					);
 				}
+
+				// Remove the user from the map after expiration
+				userTimeouts.delete(userId);
 			}, duration * 60000);
+
+			// Store the timeout
+			userTimeouts.set(userId, timeout);
 
 			interaction.reply(
 				`You have joined the PUG Queue for ${duration} minutes!`

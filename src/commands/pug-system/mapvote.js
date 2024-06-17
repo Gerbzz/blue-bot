@@ -1,14 +1,24 @@
 /** @format */
 
-const { EmbedBuilder, MessageReaction } = require("discord.js");
+const { EmbedBuilder } = require("discord.js");
 const pugModel = require("../../models/pug-model");
 require("dotenv").config();
 
+let commandCooldown = false;
+
 module.exports = {
-	name: "vote-maps",
+	name: "mapvote",
 	description: "Vote for maps in the PUG Queue.",
 	options: [],
 	callback: async (client, interaction) => {
+		if (commandCooldown) {
+			return interaction.reply({
+				content:
+					"The mapvote command is on cooldown. Please wait 3 minutes before using it again.",
+				ephemeral: true,
+			});
+		}
+
 		try {
 			const pugData = await pugModel.findOne({
 				serverId: interaction.guild.id,
@@ -31,8 +41,8 @@ module.exports = {
 
 			const fields = mapList.map((map, index) => {
 				return {
-					name: `${index + 1}️⃣ - ${map} •`,
-					value: "0 votes",
+					name: `${index + 1}️⃣ - ${map}`,
+					value: "\n", // Add a newline character
 					inline: false,
 				};
 			});
@@ -40,28 +50,36 @@ module.exports = {
 			const embed = new EmbedBuilder()
 				.setTitle("Which map do you want to play?")
 				.setDescription("React below to vote for a map.")
+				.setColor("#112b80") // Blue color
 				.addFields(fields);
 
+			// Defer the initial reply
+			await interaction.deferReply({ ephemeral: false });
 			const message = await interaction.channel.send({ embeds: [embed] });
 			console.log("Message sent for voting.");
 
-			for (let i = 0; i < mapList.length; i++) {
-				await message.react(`${i + 1}️⃣`); // 1️⃣, 2️⃣, 3️⃣, ...
-			}
+			// Add reactions to the message
+			const reactionPromises = mapList.map((_, index) =>
+				message.react(`${index + 1}️⃣`)
+			);
+			await Promise.all(reactionPromises);
 			console.log("Reactions added to the message.");
 
+			// Create a reaction collector
 			const filter = (reaction, user) => user.id !== message.author.id;
 			const collector = message.createReactionCollector({
 				filter,
-				time: 10000, // 10 seconds for testing
+				time: 10000, // 3 minutes for testing
 			});
 
+			// Handle reactions
 			const votedUsers = new Set();
-			const roleId = process.env.ROLE_ID;
-
 			const ROLE_ID = process.env.ROLE_ID;
 			const ROLE_ID_MLG = process.env.ROLE_ID_MLG;
 			const ROLE_ID_WR = process.env.ROLE_ID_WR;
+			const rolesMention = [ROLE_ID, ROLE_ID_MLG, ROLE_ID_WR]
+				.map((roleId) => `<@&${roleId}>`)
+				.join(" ");
 
 			collector.on("collect", async (reaction, user) => {
 				const member = await interaction.guild.members.fetch(user.id);
@@ -74,28 +92,15 @@ module.exports = {
 					return;
 				}
 
-				if (votedUsers.has(user.id)) return; // User has already voted
-				votedUsers.add(user.id); // Add user to the set of voted users
-
-				// Update vote count in embed
-				const embed = message.embeds[0];
-				const mapIndex = parseInt(reaction.emoji.name) - 1; // Get the map index from the reaction emoji
-				const mapFieldName = `${mapIndex + 1}️⃣ - ${mapList[mapIndex]} •`;
-				const fieldValue = embed.fields.find((field) =>
-					field.name.startsWith(mapFieldName)
-				);
-
-				// Check if fieldValue is undefined before trying to update it
-				if (fieldValue) {
-					fieldValue.value = `${
-						parseInt(fieldValue.value.split(" ")[0] || 0) + 1
-					} votes`; // Increment vote count
-					await message.edit({ embeds: [embed] }); // Update the embed
+				if (!votedUsers.has(`${user.id}-${reaction.emoji.name}`)) {
 					console.log(
-						`User ${user.username} voted for map ${mapList[mapIndex]}.`
+						`User ${user.username} voted for map ${
+							mapList[parseInt(reaction.emoji.name) - 1]
+						}.`
 					);
-				} else {
-					console.error("Field not found:", mapFieldName);
+
+					// Add user's ID and reaction emoji name to votedUsers set
+					votedUsers.add(`${user.id}-${reaction.emoji.name}`);
 				}
 			});
 
@@ -113,41 +118,14 @@ module.exports = {
 				}
 
 				if (reaction.message.id === message.id) {
-					// Check if the reaction removed is part of the voting message
-					if (reaction.partial) {
-						try {
-							await reaction.fetch();
-						} catch (error) {
-							console.error("Error fetching removed reaction:", error);
-							return;
-						}
-					}
+					console.log(
+						`User ${user.username} removed their vote for map ${
+							mapList[parseInt(reaction.emoji.name) - 1]
+						}.`
+					);
 
-					// Update the vote count in the embed
-					if (reaction instanceof MessageReaction) {
-						const embed = message.embeds[0];
-						const mapIndex = parseInt(reaction.emoji.name) - 1;
-						const mapFieldName = `${mapIndex + 1}️⃣ - ${mapList[mapIndex]} •`;
-						const fieldValue = embed.fields.find((field) =>
-							field.name.startsWith(mapFieldName)
-						);
-
-						if (fieldValue) {
-							fieldValue.value = `${Math.max(
-								parseInt(fieldValue.value.split(" ")[0] || 0) - 1,
-								0
-							)} votes`; // Decrement vote count
-							await message.edit({ embeds: [embed] }); // Update the embed
-							console.log(
-								`User ${user.username} removed their vote for map ${mapList[mapIndex]}.`
-							);
-
-							// Remove user's ID from votedUsers set
-							votedUsers.delete(user.id);
-						} else {
-							console.error("Field not found:", mapFieldName);
-						}
-					}
+					// Remove user's ID and reaction emoji name from votedUsers set
+					votedUsers.delete(`${user.id}-${reaction.emoji.name}`);
 				}
 			});
 
@@ -161,18 +139,24 @@ module.exports = {
 					const embed = fetchedMessage.embeds[0]; // Get the embed from the fetched message
 
 					// Process votes and calculate winner(s)
+					const reactionCounts = fetchedMessage.reactions.cache.map(
+						(reaction) => ({
+							emoji: reaction.emoji.name,
+							count: reaction.count - 1, // Subtract the bot's reaction
+						})
+					);
+
 					let highestVoteCount = 0;
 					const winners = [];
-					for (let i = 0; i < embed.fields.length; i++) {
-						const mapVoteCount = parseInt(
-							embed.fields[i].value.split(" ")[0] || 0
-						);
+
+					for (let i = 0; i < reactionCounts.length; i++) {
+						const mapVoteCount = reactionCounts[i].count;
 						if (mapVoteCount > highestVoteCount) {
 							highestVoteCount = mapVoteCount;
 							winners.length = 0; // Clear previous winners
-							winners.push(embed.fields[i].name.split(" - ")[1].split(" •")[0]); // Extract map name
+							winners.push(mapList[i]); // Add the current map
 						} else if (mapVoteCount === highestVoteCount) {
-							winners.push(embed.fields[i].name.split(" - ")[1].split(" •")[0]); // Add tied maps
+							winners.push(mapList[i]); // Add tied maps
 						}
 					}
 
@@ -191,6 +175,7 @@ module.exports = {
 					const resultsEmbed = new EmbedBuilder()
 						.setTitle("Voting Results")
 						.setDescription(resultDescription)
+						.setColor("#112b80") // Blue color
 						.addFields(
 							{
 								name: "NY 1",
@@ -227,9 +212,23 @@ module.exports = {
 					);
 				}
 			});
+
+			// Set command cooldown and clear after 3 minutes (180000 milliseconds)
+			commandCooldown = true;
+			setTimeout(() => {
+				commandCooldown = false;
+			}, 180000);
+
+			// Follow up message mentioning the roles
+			await interaction.followUp({
+				content: `${rolesMention}, voting for maps in the PUG Queue has started!`,
+				ephemeral: false,
+			});
 		} catch (error) {
-			console.error("Error in vote-maps command:", error);
-			interaction.reply("Error processing voting. Please try again!");
+			console.error("Error executing the mapvote command:", error);
+			await interaction.reply(
+				"An error occurred while starting the voting. Please try again!"
+			);
 		}
 	},
 };

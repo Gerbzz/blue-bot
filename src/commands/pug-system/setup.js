@@ -40,7 +40,9 @@ module.exports = {
 			});
 
 			if (existingData) {
-				return interaction.reply("PUG data already exists for this server!");
+				return interaction.reply(
+					"PUG data already exists for this server! If you wish to update the map list please use /set-maps to update the map list!"
+				);
 			}
 
 			console.log("this is the guildId before transfering...." + guildId);
